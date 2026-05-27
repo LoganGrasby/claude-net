@@ -1,0 +1,9 @@
+{
+  "//": "Example registration for testing claude-net inside THIS repo. To use it in another project, point args at the absolute path of src/claude-net.ts. Set CLAUDE_NET_NAME to the name peers see (defaults to your host name). CLAUDE_NET_PROJECT defaults to the directory Claude Code runs in.",
+  "mcpServers": {
+    "claude-net": {
+      "command": "bun",
+      "args": ["src/claude-net.ts"]
+    }
+  }
+}

@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+
+# runtime state — identity + paired peers live here by default (CLAUDE_NET_HOME)
+.claude-net/
+
+# logs / OS cruft
+*.log
+.DS_Store
+
+# local env
+.env
+.env.*

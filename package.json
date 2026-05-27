@@ -1,0 +1,41 @@
+{
+  "name": "claude-net",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Claude Code channel that lets Claude sessions message each other across devices on the same local network.",
+  "license": "MIT",
+  "author": "Logan Grasby",
+  "homepage": "https://github.com/LoganGrasby/claude-net#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LoganGrasby/claude-net.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LoganGrasby/claude-net/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "channel",
+    "mdns",
+    "dns-sd",
+    "lan",
+    "peer-to-peer"
+  ],
+  "scripts": {
+    "start": "bun src/claude-net.ts",
+    "demo": "bun test/demo.ts",
+    "test": "bun test/e2e.ts && bun test/mcp.ts && bun test/emit.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "bonjour-service": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^6.0.3"
+  }
+}
