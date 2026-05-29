@@ -37,6 +37,7 @@ import {
 } from './state'
 import { startDiscovery, type Discovery } from './discovery'
 import { startPeerServer, postJson, type InboundReply } from './transport'
+import { startMcast, type McastTransport } from './mcast'
 import { startInboxServer, type UiSnapshot } from './inbox'
 
 type Result = { ok: boolean; message: string }
@@ -87,6 +88,7 @@ class Hub {
   private readonly seenMsgIds = new Set<string>()
   private notify?: (n: { method: string; params: unknown }) => void
   private peerPort = 0
+  private mcast?: McastTransport
 
   constructor(
     readonly config: Config,
@@ -100,6 +102,9 @@ class Hub {
   }
   setPeerPort(p: number) {
     this.peerPort = p
+  }
+  setMcast(m: McastTransport) {
+    this.mcast = m
   }
 
   // --- observability ------------------------------------------------------
@@ -264,18 +269,33 @@ class Hub {
     const port = live?.port ?? peer.port
     if (!addr || !port) return err(`no known address for ${peer.display_name} (are they online?)`)
 
+    // One msg_id for both transports so the receiver dedups across them.
+    const msgId = newNonce()
     try {
       const res = await postJson(addr, port, '/msg', {
         from_id: this.identity.peer_id,
         token: peer.token,
         text,
-        msg_id: newNonce(),
+        msg_id: msgId,
       })
       if (!res.ok) return err(`delivery failed (HTTP ${res.status}); ${peer.display_name} may be offline`)
       this.addLog('out', 'message', text, peer.display_name)
       return ok(`sent to ${peer.display_name}`)
     } catch (e) {
-      return err(`could not reach ${peer.display_name}: ${(e as Error).message}`)
+      // The peer's direct port is unreachable (firewall, wrong-interface bind,
+      // or a dead advertised port). Fall back to the multicast path, which
+      // rides the same mDNS channel discovery already uses bidirectionally.
+      const viaMcast = this.mcast
+        ? await this.mcast.send(peer.peer_id, peer.token, text, msgId).catch(() => false)
+        : false
+      if (viaMcast) {
+        this.addLog('out', 'message', `${text} (via multicast)`, peer.display_name)
+        return ok(`sent to ${peer.display_name} (over multicast — direct port unreachable)`)
+      }
+      return err(
+        `could not reach ${peer.display_name} over the direct port (${(e as Error).message}) ` +
+          `or multicast (no ACK — they may be offline or not running a build with multicast support)`,
+      )
     }
   }
 
@@ -389,26 +409,49 @@ class Hub {
     if (!peer) return { status: 403, body: 'unknown peer — pair first' }
     if (token !== peer.token) return { status: 403, body: 'bad token' }
     if (!text) return { status: 400, body: 'empty' }
-    if (msgId && this.seenMsgIds.has(msgId)) return { status: 200, body: 'duplicate' }
+
+    // Keep the peer's address fresh for our replies (the multicast path can't
+    // do this — it has no return route — so the unicast path is what relearns
+    // an address after the peer moves).
+    peer.addr = srcIp
+    const fresh = this.deliverInbound(fromId, text, msgId)
+    return { status: 200, body: fresh ? 'ok' : 'duplicate' }
+  }
+
+  /**
+   * Accept a message that arrived over the multicast transport. The payload was
+   * already authenticated by the AES-GCM tag (only the paired peer holds the
+   * token), so there is no separate token check here. Returns a status the
+   * transport uses to decide whether to ACK.
+   */
+  acceptMulticast(fromId: string, text: string, msgId: string): 'delivered' | 'duplicate' | 'rejected' {
+    if (!this.peers.has(fromId) || !text) return 'rejected'
+    return this.deliverInbound(fromId, text, msgId) ? 'delivered' : 'duplicate'
+  }
+
+  /**
+   * Shared tail of both inbound transports: dedup by msg_id, refresh last_seen,
+   * and surface the message to Claude. Returns false if it was a duplicate.
+   * Identity attributes come from OUR paired record, not the payload — a peer
+   * chooses what it says, not who we think it is.
+   */
+  private deliverInbound(fromId: string, text: string, msgId: string): boolean {
+    const peer = this.peers.get(fromId)
+    if (!peer || !text) return false
+    if (msgId && this.seenMsgIds.has(msgId)) return false
     if (msgId) {
       this.seenMsgIds.add(msgId)
       if (this.seenMsgIds.size > 1000) this.seenMsgIds.clear()
     }
-
-    // Keep the peer's address fresh for our replies.
-    peer.addr = srcIp
     peer.last_seen = new Date().toISOString()
     savePeers(this.config.home, this.peers)
-
     this.addLog('in', 'message', text, peer.display_name)
-    // Identity attributes come from OUR paired record, not from this payload —
-    // a peer can choose what it says, not who we think it is.
     this.emitChannel('message', text, {
       peer_id: peer.peer_id,
       peer_name: peer.display_name,
       project: peer.project,
     })
-    return { status: 200, body: 'ok' }
+    return true
   }
 }
 
@@ -576,6 +619,16 @@ async function main() {
     onDown: (m) => hub.rosterDown(m),
   })
 
+  // 3b. Multicast message transport — the fallback used when a peer's direct
+  //     port is unreachable. Shares the LAN interface and subnet gate.
+  const mcast = startMcast({
+    identity,
+    iface: config.iface,
+    peerToken: (id) => peers.get(id)?.token,
+    accept: (from, text, mid) => hub.acceptMulticast(from, text, mid),
+  })
+  hub.setMcast(mcast)
+
   // 4. Local inbox UI (loopback only).
   const ui = startInboxServer(config.uiPort, hub)
 
@@ -584,12 +637,16 @@ async function main() {
       `  identity : ${identity.peer_id}\n` +
       `  network  : iface ${config.iface.name} ${config.iface.address}/${config.iface.netmask}\n` +
       `  peers on : http://${config.iface.address}:${peer.port} (subnet-gated)\n` +
+      `  fallback : multicast over mDNS (used when the direct port is unreachable)\n` +
       `  inbox UI : http://127.0.0.1:${ui.port}`,
   )
 
   const shutdown = () => {
     try {
       discovery.stop()
+    } catch {}
+    try {
+      mcast.stop()
     } catch {}
     try {
       peer.stop()

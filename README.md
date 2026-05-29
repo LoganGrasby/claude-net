@@ -18,6 +18,13 @@ replies with the `send_message` tool.
   link-local, so the peers you can ever see *are* your local network.
 - **Transport** — direct peer-to-peer HTTP, bound to one LAN interface;
   connections off that interface's subnet are refused.
+- **Fallback transport** — if a peer's direct port is unreachable (a firewall,
+  a wrong-interface bind, or a stale advertised port), the message is re-sent
+  over multicast on the same mDNS channel discovery already uses. The body is
+  AES-256-GCM sealed under a key derived from the per-pair token (the token
+  never goes on the wire; only the recipient can decrypt), chunked across DNS
+  TXT records, and confirmed by an authenticated multicast ACK so `send_message`
+  still only reports success on real delivery.
 - **Trust** — a peer is untrusted until your human approves a short pairing
   code; after that, every message carries a per-pair secret token.
 
@@ -124,11 +131,17 @@ Three layers keep the channel local and authenticated:
    code; every `/msg` needs a paired `from_id` *and* its secret token. The
    identity Claude sees comes from *your* paired record, never the payload;
    untrusted strings are control-stripped and length-clamped.
+4. **Sealed multicast fallback** — the multicast path can't be point-to-point,
+   so its payload is AES-256-GCM sealed under a key derived from the pair token
+   (routing fields bound as AAD). The token is never transmitted, non-recipients
+   see only ciphertext, and a valid auth tag proves the sender is the paired peer.
 
 **Known gaps (research-preview demo, not hardened):**
 
-- **No transport encryption** — plaintext HTTP on the LAN; a sniffer can read
-  tokens/messages. Add TLS/Noise for a hostile LAN.
+- **No transport encryption on the direct path** — the primary HTTP hop is
+  plaintext on the LAN; a sniffer can read tokens/messages. (The multicast
+  fallback *is* sealed — see layer 4 above.) Add TLS/Noise to the HTTP hop for a
+  hostile LAN.
 - **No revocation/rotation** — un-pair by deleting the peer from
   `~/.claude-net/peers.json`. A duplicate pair request from a known id is
   refused (`409`), never re-sending the token.
